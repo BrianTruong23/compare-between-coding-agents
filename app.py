@@ -12,7 +12,9 @@ DATA_DIR = BASE_DIR / "data"
 DEFAULT_DB_PATH = DATA_DIR / "evaluations.db"
 DEFAULT_EXPORT_PATH = DATA_DIR / "export.json"
 AGENTS = ["Codex", "Claude Code", "Cursor", "Antigravity"]
-DEFAULT_METHOD = "Plan mode first -> complete the task"
+DEFAULT_METHOD = "Plan then code"
+DEFAULT_METHOD_BUCKET = "plan-then-code"
+LEGACY_DEFAULT_METHOD = "Plan mode first -> complete the task"
 
 
 def create_app(test_config=None):
@@ -69,18 +71,19 @@ def create_app(test_config=None):
     def save_method():
         method_id = request.form.get("id")
         name = require_form("name")
+        bucket = require_form("bucket")
         steps = request.form.get("steps", "").strip()
         if method_id:
             query_db(
-                "UPDATE instruction_methods SET name = ?, steps = ? WHERE id = ?",
-                (name, steps, method_id),
+                "UPDATE instruction_methods SET name = ?, bucket = ?, steps = ? WHERE id = ?",
+                (name, bucket, steps, method_id),
                 commit=True,
             )
             flash("Instruction method updated.")
         else:
             query_db(
-                "INSERT INTO instruction_methods (name, steps, created_at) VALUES (?, ?, ?)",
-                (name, steps, now()),
+                "INSERT INTO instruction_methods (name, bucket, steps, created_at) VALUES (?, ?, ?, ?)",
+                (name, bucket, steps, now()),
                 commit=True,
             )
             flash("Instruction method added.")
@@ -90,7 +93,10 @@ def create_app(test_config=None):
     def api_add_task():
         payload = request.get_json(silent=True) or {}
         try:
-            method_id = resolve_method(payload.get("instruction_method") or payload.get("method_name") or DEFAULT_METHOD)
+            method_id = resolve_method(
+                payload.get("instruction_method") or payload.get("method_name") or DEFAULT_METHOD,
+                payload.get("instruction_bucket") or payload.get("method_bucket") or DEFAULT_METHOD_BUCKET,
+            )
             record = create_task_record(
                 {
                     "task_name": clean_required(payload.get("task_name"), "task_name"),
@@ -163,6 +169,7 @@ def init_db(path):
             CREATE TABLE IF NOT EXISTS instruction_methods (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
+                bucket TEXT NOT NULL DEFAULT 'plan-then-code',
                 steps TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             );
@@ -180,6 +187,7 @@ def init_db(path):
             );
             """
         )
+        ensure_method_bucket_column(db)
         seed_methods(db)
         migrate_old_evaluations(db)
         seed_records(db)
@@ -188,24 +196,61 @@ def init_db(path):
         db.close()
 
 
+def ensure_method_bucket_column(db):
+    columns = {row[1] for row in db.execute("PRAGMA table_info(instruction_methods)").fetchall()}
+    if "bucket" not in columns:
+        db.execute(
+            "ALTER TABLE instruction_methods ADD COLUMN bucket TEXT NOT NULL DEFAULT 'plan-then-code'"
+        )
+    db.execute(
+        "UPDATE instruction_methods SET bucket = ? WHERE bucket IS NULL OR bucket = ''",
+        (DEFAULT_METHOD_BUCKET,),
+    )
+
+
 def seed_methods(db):
+    legacy = db.execute("SELECT id FROM instruction_methods WHERE name = ?", (LEGACY_DEFAULT_METHOD,)).fetchone()
     existing = db.execute("SELECT id FROM instruction_methods WHERE name = ?", (DEFAULT_METHOD,)).fetchone()
+    if legacy:
+        if existing:
+            db.execute("UPDATE task_records SET method_id = ? WHERE method_id = ?", (existing[0], legacy[0]))
+            if table_exists(db, "evaluations"):
+                db.execute("UPDATE evaluations SET method_id = ? WHERE method_id = ?", (existing[0], legacy[0]))
+            db.execute("DELETE FROM instruction_methods WHERE id = ?", (legacy[0],))
+        else:
+            db.execute(
+                "UPDATE instruction_methods SET name = ?, bucket = ? WHERE id = ?",
+                (DEFAULT_METHOD, DEFAULT_METHOD_BUCKET, legacy[0]),
+            )
+            existing = db.execute("SELECT id FROM instruction_methods WHERE name = ?", (DEFAULT_METHOD,)).fetchone()
     if existing:
+        db.execute(
+            "UPDATE instruction_methods SET bucket = ? WHERE id = ? AND (bucket IS NULL OR bucket = '')",
+            (DEFAULT_METHOD_BUCKET, existing[0]),
+        )
         return
     db.execute(
         """
-        INSERT INTO instruction_methods (name, steps, created_at)
-        VALUES (?, ?, ?)
+        INSERT INTO instruction_methods (name, bucket, steps, created_at)
+        VALUES (?, ?, ?, ?)
         """,
         (
             DEFAULT_METHOD,
+            DEFAULT_METHOD_BUCKET,
             "1. Ask the agent for a concrete implementation plan.\n"
             "2. Review the plan.\n"
             "3. Ask the agent to complete the task.\n"
             "4. Record whether the result satisfied the need.",
             now(),
         ),
-    )
+        )
+
+
+def table_exists(db, table_name):
+    return db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone() is not None
 
 
 def migrate_old_evaluations(db):
@@ -275,7 +320,7 @@ def dashboard_data(filters):
 
     records = query_db(
         f"""
-        SELECT r.*, m.name AS method_name
+        SELECT r.*, m.name AS method_name, m.bucket AS method_bucket
         FROM task_records r
         JOIN instruction_methods m ON m.id = r.method_id
         {where_sql}
@@ -283,7 +328,8 @@ def dashboard_data(filters):
         """,
         tuple(params),
     )
-    methods = query_db("SELECT * FROM instruction_methods ORDER BY name")
+    methods = query_db("SELECT * FROM instruction_methods ORDER BY bucket, name")
+    method_groups = group_methods(methods)
 
     total = len(records)
     satisfied = sum(1 for row in records if row["satisfied"])
@@ -307,6 +353,7 @@ def dashboard_data(filters):
     return {
         "records": records,
         "methods": methods,
+        "method_groups": method_groups,
         "agent_stats": agent_stats,
         "summary": {
             "total": total,
@@ -318,14 +365,28 @@ def dashboard_data(filters):
     }
 
 
+def group_methods(methods):
+    groups = []
+    by_bucket = {}
+    for method in methods:
+        bucket = method["bucket"] or DEFAULT_METHOD_BUCKET
+        if bucket not in by_bucket:
+            by_bucket[bucket] = []
+            groups.append({"bucket": bucket, "methods": by_bucket[bucket]})
+        by_bucket[bucket].append(method)
+    return groups
+
+
 def api_example(methods):
     method_name = methods[0]["name"] if methods else DEFAULT_METHOD
+    method_bucket = methods[0]["bucket"] if methods else DEFAULT_METHOD_BUCKET
     return json.dumps(
         {
             "task_name": "Implement feature X",
             "agent_name": "Codex",
             "github_repo_link": "https://github.com/example/repo",
             "satisfied": True,
+            "instruction_bucket": method_bucket,
             "instruction_method": method_name,
         },
         indent=2,
@@ -374,16 +435,19 @@ def update_task_record(task_id, payload):
     )
 
 
-def resolve_method(name):
+def resolve_method(name, bucket=DEFAULT_METHOD_BUCKET):
     method_name = str(name or "").strip()
+    method_bucket = str(bucket or DEFAULT_METHOD_BUCKET).strip()
     if not method_name:
         raise ValueError("instruction_method is required")
+    if method_name == LEGACY_DEFAULT_METHOD:
+        method_name = DEFAULT_METHOD
     row = query_db("SELECT id FROM instruction_methods WHERE name = ?", (method_name,), one=True)
     if row:
         return row["id"]
     query_db(
-        "INSERT INTO instruction_methods (name, steps, created_at) VALUES (?, ?, ?)",
-        (method_name, "", now()),
+        "INSERT INTO instruction_methods (name, bucket, steps, created_at) VALUES (?, ?, ?, ?)",
+        (method_name, method_bucket, "", now()),
         commit=True,
     )
     row = query_db("SELECT id FROM instruction_methods WHERE name = ?", (method_name,), one=True)
@@ -424,7 +488,7 @@ def insert_rows(db, table, rows):
     if not rows:
         return
     allowed_fields = {
-        "instruction_methods": ["id", "name", "steps", "created_at"],
+        "instruction_methods": ["id", "name", "bucket", "steps", "created_at"],
         "task_records": [
             "id",
             "task_name",
@@ -438,6 +502,9 @@ def insert_rows(db, table, rows):
     }[table]
     for row in rows:
         fields = [field for field in allowed_fields if field in row]
+        if table == "instruction_methods" and "bucket" not in fields:
+            row["bucket"] = DEFAULT_METHOD_BUCKET
+            fields.append("bucket")
         if table == "task_records" and "updated_at" not in fields:
             row["updated_at"] = row["created_at"]
             fields.append("updated_at")

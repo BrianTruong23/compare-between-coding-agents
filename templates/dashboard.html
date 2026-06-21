@@ -75,8 +75,12 @@
                   Method
                   <select name="method_id">
                     <option value="">All methods</option>
-                    {% for method in methods %}
-                      <option value="{{ method.id }}" {% if filters.method_id|string == method.id|string %}selected{% endif %}>{{ method.name }}</option>
+                    {% for group in method_groups %}
+                      <optgroup label="{{ group.bucket }}">
+                        {% for method in group.methods %}
+                          <option value="{{ method.id }}" {% if filters.method_id|string == method.id|string %}selected{% endif %}>{{ method.name }}</option>
+                        {% endfor %}
+                      </optgroup>
                     {% endfor %}
                   </select>
                 </label>
@@ -93,7 +97,7 @@
                   <th>Task</th>
                   <th>Agent</th>
                   <th>Status</th>
-                  <th>Instruction Method</th>
+                  <th>Instruction</th>
                   <th>Repo</th>
                   <th>Added</th>
                   <th></th>
@@ -105,7 +109,10 @@
                     <td>{{ record.task_name }}</td>
                     <td>{{ record.agent_name }}</td>
                     <td><span class="status {{ 'pass' if record.satisfied else 'fail' }}">{{ 'Satisfied' if record.satisfied else 'Not satisfied' }}</span></td>
-                    <td>{{ record.method_name }}</td>
+                    <td>
+                      <span>{{ record.method_name }}</span>
+                      <small class="bucket-label">{{ record.method_bucket }}</small>
+                    </td>
                     <td>
                       {% if record.repo_link %}
                         <a href="{{ record.repo_link }}" target="_blank" rel="noreferrer">Open repo</a>
@@ -176,8 +183,12 @@
               </label>
               <label>Instruction method
                 <select name="method_id" required>
-                  {% for method in methods %}
-                    <option value="{{ method.id }}">{{ method.name }}</option>
+                  {% for group in method_groups %}
+                    <optgroup label="{{ group.bucket }}">
+                      {% for method in group.methods %}
+                        <option value="{{ method.id }}">{{ method.name }}</option>
+                      {% endfor %}
+                    </optgroup>
                   {% endfor %}
                 </select>
               </label>
@@ -190,6 +201,11 @@
             <form action="{{ url_for('save_method') }}" method="post" data-edit-form="method">
               <input type="hidden" name="id">
               <label>Name<input name="name" required></label>
+              <label>Bucket
+                <select name="bucket" required>
+                  <option value="plan-then-code">plan-then-code</option>
+                </select>
+              </label>
               <label>Steps<textarea name="steps" rows="4"></textarea></label>
               <button class="button primary" type="submit">Save method</button>
             </form>
@@ -208,7 +224,7 @@
           <h2>Methods</h2>
           {% for method in methods %}
             <div class="compact-row">
-              <span>{{ method.name }}</span>
+              <span>{{ method.name }} <small class="bucket-label">{{ method.bucket }}</small></span>
               <button class="link-button" type="button" data-target="method" data-edit='{{ dict(method)|tojson }}'>Edit</button>
             </div>
           {% endfor %}

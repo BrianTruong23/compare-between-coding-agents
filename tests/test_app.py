@@ -29,7 +29,8 @@ class DashboardTestCase(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Coding Agent Task Tracker", response.data)
-        self.assertIn(b"Plan mode first -&gt; complete the task", response.data)
+        self.assertIn(b"Plan then code", response.data)
+        self.assertIn(b"plan-then-code", response.data)
         self.assertIn(b"POST /api/tasks", response.data)
 
     def test_manual_task_record_create_and_filter(self):
@@ -57,7 +58,8 @@ class DashboardTestCase(unittest.TestCase):
                 "agent_name": "Cursor",
                 "github_repo_link": "https://github.com/example/refactor",
                 "satisfied": False,
-                "instruction_method": "Plan mode first -> complete the task",
+                "instruction_bucket": "plan-then-code",
+                "instruction_method": "Plan then code",
             },
         )
 
@@ -77,6 +79,7 @@ class DashboardTestCase(unittest.TestCase):
                 "task_name": "Try alternate prompt",
                 "agent_name": "Antigravity",
                 "satisfied": "yes",
+                "instruction_bucket": "direct-code",
                 "instruction_method": "No plan, direct implementation",
             },
         )
@@ -84,6 +87,7 @@ class DashboardTestCase(unittest.TestCase):
 
         dashboard = self.client.get("/")
         self.assertIn(b"No plan, direct implementation", dashboard.data)
+        self.assertIn(b"direct-code", dashboard.data)
 
     def test_export_and_import_round_trip(self):
         export_response = self.client.post("/export")

@@ -17,10 +17,10 @@ The app creates `data/evaluations.db` automatically and seeds example records fo
 
 ## One-Line Agent Update Command
 
-Give this to a coding agent before it starts work so it knows how to record the result after it finishes. If the instruction method was not already specified, the agent should ask the user what instruction method to record before running the command. After the task is complete, the agent should replace the placeholders, set `satisfied` based on the user's final judgment, run the command, and briefly confirm whether the tracker update succeeded.
+Give this to a coding agent before it starts work so it knows how to record the result after it finishes. If the instruction bucket or method was not already specified, the agent should ask the user what to record before running the command; for plan-first work, use bucket `plan-then-code` and method `Plan then code`. After the task is complete, the agent should replace the placeholders, set `satisfied` based on the user's final judgment, run the command, and briefly confirm whether the tracker update succeeded.
 
 ```bash
-curl -s -X POST http://127.0.0.1:5055/api/tasks -H 'content-type: application/json' -d '{"task_name":"REPLACE_WITH_TASK_NAME","agent_name":"REPLACE_WITH_AGENT_NAME","github_repo_link":"https://github.com/OWNER/REPO","satisfied":true,"instruction_method":"ASK_USER_FOR_INSTRUCTION_METHOD"}'
+curl -s -X POST http://127.0.0.1:5055/api/tasks -H 'content-type: application/json' -d '{"task_name":"REPLACE_WITH_TASK_NAME","agent_name":"REPLACE_WITH_AGENT_NAME","github_repo_link":"https://github.com/OWNER/REPO","satisfied":true,"instruction_bucket":"plan-then-code","instruction_method":"Plan then code"}'
 ```
 
 Leave `github_repo_link` as an empty string when there is no repo link.
@@ -35,7 +35,8 @@ Leave `github_repo_link` as an empty string when there is no repo link.
   "agent_name": "Codex",
   "github_repo_link": "https://github.com/example/repo",
   "satisfied": true,
-  "instruction_method": "Plan mode first -> complete the task"
+  "instruction_bucket": "plan-then-code",
+  "instruction_method": "Plan then code"
 }
 ```
 
@@ -69,7 +70,7 @@ Use **Export JSON** to write and download `data/export.json`. Import expects:
 
 Required fields:
 
-- `instruction_methods`: `id`, `name`, `created_at`
+- `instruction_methods`: `id`, `name`, `bucket`, `created_at`
 - `task_records`: `id`, `task_name`, `agent_name`, `satisfied`, `method_id`, `created_at`
 
 SQLite remains the source of truth. JSON is only for backup and restore.

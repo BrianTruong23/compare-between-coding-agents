@@ -308,6 +308,13 @@ th {
   color: var(--muted);
 }
 
+.bucket-label {
+  color: var(--muted);
+  display: block;
+  font-size: 0.76rem;
+  margin-top: 3px;
+}
+
 .messages {
   display: grid;
   gap: 8px;
