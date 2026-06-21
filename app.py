@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, flash, g, redirect, render_template, request, send_file, url_for
+from flask import Flask, flash, g, jsonify, redirect, render_template, request, send_file, url_for
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -40,7 +40,6 @@ def create_app(test_config=None):
     @app.route("/")
     def dashboard():
         filters = {
-            "project_id": request.args.get("project_id", ""),
             "agent_name": request.args.get("agent_name", ""),
             "status": request.args.get("status", ""),
             "method_id": request.args.get("method_id", ""),
@@ -48,58 +47,22 @@ def create_app(test_config=None):
         data = dashboard_data(filters)
         return render_template("dashboard.html", agents=AGENTS, filters=filters, **data)
 
-    @app.route("/projects", methods=["POST"])
-    def save_project():
-        project_id = request.form.get("id")
-        name = require_form("name")
-        description = request.form.get("description", "").strip()
-        if project_id:
-            query_db(
-                "UPDATE projects SET name = ?, description = ? WHERE id = ?",
-                (name, description, project_id),
-                commit=True,
-            )
-            flash("Project updated.")
-        else:
-            query_db(
-                "INSERT INTO projects (name, description, created_at) VALUES (?, ?, ?)",
-                (name, description, now()),
-                commit=True,
-            )
-            flash("Project created.")
-        return redirect(url_for("dashboard"))
-
     @app.route("/tasks", methods=["POST"])
     def save_task():
         task_id = request.form.get("id")
-        values = (
-            require_form("project_id"),
-            require_form("title"),
-            request.form.get("original_request", "").strip(),
-            request.form.get("expected_outcome", "").strip(),
-        )
+        payload = {
+            "task_name": require_form("task_name"),
+            "agent_name": require_form("agent_name"),
+            "repo_link": request.form.get("repo_link", "").strip(),
+            "satisfied": parse_satisfied(request.form.get("satisfied")),
+            "method_id": require_form("method_id"),
+        }
         if task_id:
-            query_db(
-                """
-                UPDATE tasks
-                SET project_id = ?, title = ?, original_request = ?, expected_outcome = ?
-                WHERE id = ?
-                """,
-                values + (task_id,),
-                commit=True,
-            )
-            flash("Task updated.")
+            update_task_record(task_id, payload)
+            flash("Task record updated.")
         else:
-            query_db(
-                """
-                INSERT INTO tasks
-                    (project_id, title, original_request, expected_outcome, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                values + (now(),),
-                commit=True,
-            )
-            flash("Task created.")
+            create_task_record(payload)
+            flash("Task record added.")
         return redirect(url_for("dashboard"))
 
     @app.route("/methods", methods=["POST"])
@@ -120,49 +83,26 @@ def create_app(test_config=None):
                 (name, steps, now()),
                 commit=True,
             )
-            flash("Instruction method created.")
+            flash("Instruction method added.")
         return redirect(url_for("dashboard"))
 
-    @app.route("/evaluations", methods=["POST"])
-    def save_evaluation():
-        evaluation_id = request.form.get("id")
-        values = (
-            require_form("task_id"),
-            require_form("agent_name"),
-            require_form("method_id"),
-            1 if request.form.get("satisfied") == "1" else 0,
-            parse_int(request.form.get("confidence_score"), 0, 100),
-            request.form.get("issue_category", "").strip(),
-            request.form.get("notes", "").strip(),
-            request.form.get("repo_link", "").strip(),
-            request.form.get("result_link", "").strip(),
-        )
-        if evaluation_id:
-            query_db(
-                """
-                UPDATE evaluations
-                SET task_id = ?, agent_name = ?, method_id = ?, satisfied = ?,
-                    confidence_score = ?, issue_category = ?, notes = ?,
-                    repo_link = ?, result_link = ?
-                WHERE id = ?
-                """,
-                values + (evaluation_id,),
-                commit=True,
+    @app.route("/api/tasks", methods=["POST"])
+    def api_add_task():
+        payload = request.get_json(silent=True) or {}
+        try:
+            method_id = resolve_method(payload.get("instruction_method") or payload.get("method_name") or DEFAULT_METHOD)
+            record = create_task_record(
+                {
+                    "task_name": clean_required(payload.get("task_name"), "task_name"),
+                    "agent_name": clean_required(payload.get("agent_name"), "agent_name"),
+                    "repo_link": (payload.get("repo_link") or payload.get("github_repo_link") or "").strip(),
+                    "satisfied": parse_satisfied(payload.get("satisfied")),
+                    "method_id": method_id,
+                }
             )
-            flash("Evaluation updated.")
-        else:
-            query_db(
-                """
-                INSERT INTO evaluations
-                    (task_id, agent_name, method_id, satisfied, confidence_score,
-                     issue_category, notes, repo_link, result_link, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                values + (now(),),
-                commit=True,
-            )
-            flash("Evaluation created.")
-        return redirect(url_for("dashboard"))
+        except (ValueError, sqlite3.Error) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "task": dict(record)}), 201
 
     @app.route("/export", methods=["POST"])
     def export_json():
@@ -171,7 +111,7 @@ def create_app(test_config=None):
         payload = export_data()
         export_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         flash(f"Exported {sum(len(payload[key]) for key in payload)} records to {export_path}.")
-        return send_file(export_path, as_attachment=True, download_name="coding-agent-evaluations.json")
+        return send_file(export_path, as_attachment=True, download_name="coding-agent-tasks.json")
 
     @app.route("/import", methods=["POST"])
     def import_json():
@@ -220,23 +160,6 @@ def init_db(path):
     try:
         db.executescript(
             """
-            CREATE TABLE IF NOT EXISTS projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                description TEXT DEFAULT '',
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                original_request TEXT DEFAULT '',
-                expected_outcome TEXT DEFAULT '',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (project_id) REFERENCES projects(id)
-            );
-
             CREATE TABLE IF NOT EXISTS instruction_methods (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -244,43 +167,31 @@ def init_db(path):
                 created_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS evaluations (
+            CREATE TABLE IF NOT EXISTS task_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id INTEGER NOT NULL,
+                task_name TEXT NOT NULL,
                 agent_name TEXT NOT NULL,
-                method_id INTEGER NOT NULL,
-                satisfied INTEGER NOT NULL CHECK (satisfied IN (0, 1)),
-                confidence_score INTEGER NOT NULL CHECK (confidence_score BETWEEN 0 AND 100),
-                issue_category TEXT DEFAULT '',
-                notes TEXT DEFAULT '',
                 repo_link TEXT DEFAULT '',
-                result_link TEXT DEFAULT '',
+                satisfied INTEGER NOT NULL CHECK (satisfied IN (0, 1)),
+                method_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (task_id) REFERENCES tasks(id),
+                updated_at TEXT NOT NULL,
                 FOREIGN KEY (method_id) REFERENCES instruction_methods(id)
             );
             """
         )
-        seed_db(db)
+        seed_methods(db)
+        migrate_old_evaluations(db)
+        seed_records(db)
         db.commit()
     finally:
         db.close()
 
 
-def seed_db(db):
-    count = db.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
-    if count:
+def seed_methods(db):
+    existing = db.execute("SELECT id FROM instruction_methods WHERE name = ?", (DEFAULT_METHOD,)).fetchone()
+    if existing:
         return
-    created = now()
-    db.execute(
-        "INSERT INTO projects (name, description, created_at) VALUES (?, ?, ?)",
-        (
-            "Agent Comparison Dashboard",
-            "Track whether coding agents satisfy real project requests after plan-first prompting.",
-            created,
-        ),
-    )
-    project_id = db.execute("SELECT id FROM projects WHERE name = ?", ("Agent Comparison Dashboard",)).fetchone()[0]
     db.execute(
         """
         INSERT INTO instruction_methods (name, steps, created_at)
@@ -289,170 +200,207 @@ def seed_db(db):
         (
             DEFAULT_METHOD,
             "1. Ask the agent for a concrete implementation plan.\n"
-            "2. Review the plan for missing assumptions or risky shortcuts.\n"
-            "3. Ask the agent to complete the task end to end.\n"
-            "4. Manually mark whether the result satisfied the original need.",
-            created,
+            "2. Review the plan.\n"
+            "3. Ask the agent to complete the task.\n"
+            "4. Record whether the result satisfied the need.",
+            now(),
         ),
     )
-    method_id = db.execute("SELECT id FROM instruction_methods WHERE name = ?", (DEFAULT_METHOD,)).fetchone()[0]
+
+
+def migrate_old_evaluations(db):
+    old_tables = {
+        row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+    if "evaluations" not in old_tables or "tasks" not in old_tables:
+        return
+    has_records = db.execute("SELECT COUNT(*) FROM task_records").fetchone()[0]
+    if has_records:
+        return
     db.execute(
         """
-        INSERT INTO tasks
-            (project_id, title, original_request, expected_outcome, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            project_id,
-            "Build Flask evaluation tracker",
-            "Create a local dashboard for comparing coding agents across the same task.",
-            "Dashboard shows project/task records, pass-fail evaluations, confidence, issues, and import/export.",
-            created,
-        ),
+        INSERT INTO task_records
+            (task_name, agent_name, repo_link, satisfied, method_id, created_at, updated_at)
+        SELECT
+            t.title,
+            e.agent_name,
+            COALESCE(NULLIF(e.repo_link, ''), e.result_link, ''),
+            e.satisfied,
+            e.method_id,
+            e.created_at,
+            e.created_at
+        FROM evaluations e
+        JOIN tasks t ON t.id = e.task_id
+        """
     )
-    task_id = db.execute("SELECT id FROM tasks WHERE title = ?", ("Build Flask evaluation tracker",)).fetchone()[0]
-    seed_evaluations = [
-        ("Codex", 1, 92, "", "Completed the requested Flask dashboard with verification."),
-        ("Claude Code", 1, 86, "", "Strong plan and implementation, minor UI polish follow-up."),
-        ("Cursor", 0, 64, "Incomplete workflow", "Missed JSON restore behavior in first pass."),
-        ("Antigravity", 0, 58, "Verification gap", "Dashboard worked, but tests were not run."),
+
+
+def seed_records(db):
+    count = db.execute("SELECT COUNT(*) FROM task_records").fetchone()[0]
+    if count:
+        return
+    created = now()
+    method_id = db.execute("SELECT id FROM instruction_methods WHERE name = ?", (DEFAULT_METHOD,)).fetchone()[0]
+    examples = [
+        ("Build Flask evaluation tracker", "Codex", "", 1),
+        ("Build Flask evaluation tracker", "Claude Code", "", 1),
+        ("Build Flask evaluation tracker", "Cursor", "", 0),
+        ("Build Flask evaluation tracker", "Antigravity", "", 0),
     ]
-    for agent, satisfied, confidence, issue, notes in seed_evaluations:
+    for task_name, agent_name, repo_link, satisfied in examples:
         db.execute(
             """
-            INSERT INTO evaluations
-                (task_id, agent_name, method_id, satisfied, confidence_score,
-                 issue_category, notes, repo_link, result_link, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO task_records
+                (task_name, agent_name, repo_link, satisfied, method_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, agent, method_id, satisfied, confidence, issue, notes, "", "", created),
+            (task_name, agent_name, repo_link, satisfied, method_id, created, created),
         )
 
 
 def dashboard_data(filters):
     where = []
     params = []
-    if filters["project_id"]:
-        where.append("p.id = ?")
-        params.append(filters["project_id"])
     if filters["agent_name"]:
-        where.append("e.agent_name = ?")
+        where.append("r.agent_name = ?")
         params.append(filters["agent_name"])
     if filters["status"] == "satisfied":
-        where.append("e.satisfied = 1")
+        where.append("r.satisfied = 1")
     elif filters["status"] == "failed":
-        where.append("e.satisfied = 0")
+        where.append("r.satisfied = 0")
     if filters["method_id"]:
         where.append("m.id = ?")
         params.append(filters["method_id"])
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
-    evaluations = query_db(
+    records = query_db(
         f"""
-        SELECT e.*, t.title AS task_title, p.name AS project_name, m.name AS method_name
-        FROM evaluations e
-        JOIN tasks t ON t.id = e.task_id
-        JOIN projects p ON p.id = t.project_id
-        JOIN instruction_methods m ON m.id = e.method_id
+        SELECT r.*, m.name AS method_name
+        FROM task_records r
+        JOIN instruction_methods m ON m.id = r.method_id
         {where_sql}
-        ORDER BY e.created_at DESC, e.id DESC
+        ORDER BY r.created_at DESC, r.id DESC
         """,
         tuple(params),
     )
-    tasks = query_db(
-        """
-        SELECT t.*, p.name AS project_name
-        FROM tasks t JOIN projects p ON p.id = t.project_id
-        ORDER BY t.created_at DESC, t.id DESC
-        """
-    )
-    projects = query_db("SELECT * FROM projects ORDER BY name")
     methods = query_db("SELECT * FROM instruction_methods ORDER BY name")
 
-    total_tasks = len(tasks)
-    total_evaluations = len(evaluations)
-    satisfied_count = sum(1 for row in evaluations if row["satisfied"])
-    failed_count = total_evaluations - satisfied_count
-    expected_total = total_tasks * len(AGENTS)
-    pending_count = max(expected_total - count_all_evaluations_for_visible_tasks(filters), 0)
-    satisfaction_rate = round((satisfied_count / total_evaluations) * 100) if total_evaluations else 0
+    total = len(records)
+    satisfied = sum(1 for row in records if row["satisfied"])
+    failed = total - satisfied
+    satisfaction_rate = round((satisfied / total) * 100) if total else 0
 
     agent_stats = []
     for agent in AGENTS:
-        rows = [row for row in evaluations if row["agent_name"] == agent]
-        passed = sum(1 for row in rows if row["satisfied"])
-        avg_confidence = round(sum(row["confidence_score"] for row in rows) / len(rows)) if rows else 0
+        agent_rows = [row for row in records if row["agent_name"] == agent]
+        passed = sum(1 for row in agent_rows if row["satisfied"])
         agent_stats.append(
             {
                 "agent": agent,
-                "total": len(rows),
+                "total": len(agent_rows),
                 "passed": passed,
-                "failed": len(rows) - passed,
-                "rate": round((passed / len(rows)) * 100) if rows else 0,
-                "avg_confidence": avg_confidence,
+                "failed": len(agent_rows) - passed,
+                "rate": round((passed / len(agent_rows)) * 100) if agent_rows else 0,
             }
         )
 
-    issue_counts = {}
-    for row in evaluations:
-        if not row["satisfied"]:
-            label = row["issue_category"] or "Uncategorized"
-            issue_counts[label] = issue_counts.get(label, 0) + 1
-    issues = [{"category": key, "count": value} for key, value in sorted(issue_counts.items(), key=lambda item: item[1], reverse=True)]
-
-    confidence_trend = [
-        {
-            "label": row["created_at"][:10],
-            "agent": row["agent_name"],
-            "confidence": row["confidence_score"],
-        }
-        for row in list(reversed(evaluations[-12:]))
-    ]
-
     return {
-        "projects": projects,
-        "tasks": tasks,
+        "records": records,
         "methods": methods,
-        "evaluations": evaluations,
         "agent_stats": agent_stats,
-        "issues": issues,
-        "confidence_trend": confidence_trend,
         "summary": {
-            "total_tasks": total_tasks,
+            "total": total,
+            "satisfied": satisfied,
+            "failed": failed,
             "satisfaction_rate": satisfaction_rate,
-            "failed_count": failed_count,
-            "pending_count": pending_count,
-            "total_evaluations": total_evaluations,
         },
+        "api_example": api_example(methods),
     }
 
 
-def count_all_evaluations_for_visible_tasks(filters):
-    where = []
-    params = []
-    if filters["project_id"]:
-        where.append("t.project_id = ?")
-        params.append(filters["project_id"])
-    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
-    row = query_db(
-        f"SELECT COUNT(*) AS count FROM evaluations e JOIN tasks t ON t.id = e.task_id {where_sql}",
-        tuple(params),
-        one=True,
+def api_example(methods):
+    method_name = methods[0]["name"] if methods else DEFAULT_METHOD
+    return json.dumps(
+        {
+            "task_name": "Implement feature X",
+            "agent_name": "Codex",
+            "github_repo_link": "https://github.com/example/repo",
+            "satisfied": True,
+            "instruction_method": method_name,
+        },
+        indent=2,
     )
-    return row["count"] if row else 0
+
+
+def create_task_record(payload):
+    created = now()
+    query_db(
+        """
+        INSERT INTO task_records
+            (task_name, agent_name, repo_link, satisfied, method_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload["task_name"],
+            payload["agent_name"],
+            payload["repo_link"],
+            payload["satisfied"],
+            payload["method_id"],
+            created,
+            created,
+        ),
+        commit=True,
+    )
+    return query_db("SELECT * FROM task_records ORDER BY id DESC LIMIT 1", one=True)
+
+
+def update_task_record(task_id, payload):
+    query_db(
+        """
+        UPDATE task_records
+        SET task_name = ?, agent_name = ?, repo_link = ?, satisfied = ?, method_id = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            payload["task_name"],
+            payload["agent_name"],
+            payload["repo_link"],
+            payload["satisfied"],
+            payload["method_id"],
+            now(),
+            task_id,
+        ),
+        commit=True,
+    )
+
+
+def resolve_method(name):
+    method_name = str(name or "").strip()
+    if not method_name:
+        raise ValueError("instruction_method is required")
+    row = query_db("SELECT id FROM instruction_methods WHERE name = ?", (method_name,), one=True)
+    if row:
+        return row["id"]
+    query_db(
+        "INSERT INTO instruction_methods (name, steps, created_at) VALUES (?, ?, ?)",
+        (method_name, "", now()),
+        commit=True,
+    )
+    row = query_db("SELECT id FROM instruction_methods WHERE name = ?", (method_name,), one=True)
+    return row["id"]
 
 
 def export_data():
-    tables = ["projects", "tasks", "instruction_methods", "evaluations"]
-    return {table: [dict(row) for row in query_db(f"SELECT * FROM {table} ORDER BY id")] for table in tables}
+    return {
+        "instruction_methods": [dict(row) for row in query_db("SELECT * FROM instruction_methods ORDER BY id")],
+        "task_records": [dict(row) for row in query_db("SELECT * FROM task_records ORDER BY id")],
+    }
 
 
 def import_data(payload):
     required = {
-        "projects": ["id", "name", "created_at"],
-        "tasks": ["id", "project_id", "title", "created_at"],
         "instruction_methods": ["id", "name", "created_at"],
-        "evaluations": ["id", "task_id", "agent_name", "method_id", "satisfied", "confidence_score", "created_at"],
+        "task_records": ["id", "task_name", "agent_name", "satisfied", "method_id", "created_at"],
     }
     for table, fields in required.items():
         if table not in payload or not isinstance(payload[table], list):
@@ -465,12 +413,10 @@ def import_data(payload):
     db = get_db()
     with db:
         db.execute("PRAGMA foreign_keys = OFF")
-        for table in ["evaluations", "tasks", "instruction_methods", "projects"]:
-            db.execute(f"DELETE FROM {table}")
-        insert_rows(db, "projects", payload["projects"])
+        db.execute("DELETE FROM task_records")
+        db.execute("DELETE FROM instruction_methods")
         insert_rows(db, "instruction_methods", payload["instruction_methods"])
-        insert_rows(db, "tasks", payload["tasks"])
-        insert_rows(db, "evaluations", payload["evaluations"])
+        insert_rows(db, "task_records", payload["task_records"])
         db.execute("PRAGMA foreign_keys = ON")
 
 
@@ -478,25 +424,23 @@ def insert_rows(db, table, rows):
     if not rows:
         return
     allowed_fields = {
-        "projects": ["id", "name", "description", "created_at"],
-        "tasks": ["id", "project_id", "title", "original_request", "expected_outcome", "created_at"],
         "instruction_methods": ["id", "name", "steps", "created_at"],
-        "evaluations": [
+        "task_records": [
             "id",
-            "task_id",
+            "task_name",
             "agent_name",
-            "method_id",
-            "satisfied",
-            "confidence_score",
-            "issue_category",
-            "notes",
             "repo_link",
-            "result_link",
+            "satisfied",
+            "method_id",
             "created_at",
+            "updated_at",
         ],
     }[table]
     for row in rows:
         fields = [field for field in allowed_fields if field in row]
+        if table == "task_records" and "updated_at" not in fields:
+            row["updated_at"] = row["created_at"]
+            fields.append("updated_at")
         placeholders = ", ".join(["?"] * len(fields))
         db.execute(
             f"INSERT INTO {table} ({', '.join(fields)}) VALUES ({placeholders})",
@@ -505,18 +449,25 @@ def insert_rows(db, table, rows):
 
 
 def require_form(name):
-    value = request.form.get(name, "").strip()
-    if not value:
+    return clean_required(request.form.get(name), name)
+
+
+def clean_required(value, name):
+    cleaned = str(value or "").strip()
+    if not cleaned:
         raise ValueError(f"{name} is required")
-    return value
+    return cleaned
 
 
-def parse_int(value, minimum, maximum):
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        parsed = minimum
-    return max(minimum, min(maximum, parsed))
+def parse_satisfied(value):
+    if isinstance(value, bool):
+        return 1 if value else 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "satisfied", "pass", "passed"}:
+        return 1
+    if text in {"0", "false", "no", "n", "not satisfied", "failed", "fail"}:
+        return 0
+    raise ValueError("satisfied must be true or false")
 
 
 def now():

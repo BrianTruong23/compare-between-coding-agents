@@ -17,6 +17,12 @@ document.querySelectorAll("[data-edit]").forEach((button) => {
       if (status) status.value = String(payload.satisfied);
     }
 
+    if (target === "task") {
+      const status = form.elements.namedItem("satisfied");
+      if (status) status.value = String(payload.satisfied);
+    }
+
+    form.closest("details")?.setAttribute("open", "");
     form.scrollIntoView({ behavior: "smooth", block: "center" });
     const firstInput = form.querySelector("input:not([type='hidden']), select, textarea");
     if (firstInput) firstInput.focus({ preventScroll: true });
