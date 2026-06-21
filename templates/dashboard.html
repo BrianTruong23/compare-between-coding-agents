@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Coding Agent Evaluation Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Local evaluation tracker</p>
+        <h1>Coding Agent Evaluation Dashboard</h1>
+      </div>
+      <form action="{{ url_for('export_json') }}" method="post">
+        <button class="button primary" type="submit">Export JSON</button>
+      </form>
+    </header>
+
+    <main>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <section class="messages">
+            {% for category, message in messages %}
+              <div class="message {{ category }}">{{ message }}</div>
+            {% endfor %}
+          </section>
+        {% endif %}
+      {% endwith %}
+
+      <section class="summary-grid">
+        <article class="metric">
+          <span>Total tasks</span>
+          <strong>{{ summary.total_tasks }}</strong>
+        </article>
+        <article class="metric">
+          <span>Satisfaction rate</span>
+          <strong>{{ summary.satisfaction_rate }}%</strong>
+        </article>
+        <article class="metric">
+          <span>Failed evaluations</span>
+          <strong>{{ summary.failed_count }}</strong>
+        </article>
+        <article class="metric">
+          <span>Pending reviews</span>
+          <strong>{{ summary.pending_count }}</strong>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>Filters</h2>
+          <a href="{{ url_for('dashboard') }}">Clear</a>
+        </div>
+        <form class="filter-grid" method="get">
+          <label>
+            Project
+            <select name="project_id">
+              <option value="">All projects</option>
+              {% for project in projects %}
+                <option value="{{ project.id }}" {% if filters.project_id|string == project.id|string %}selected{% endif %}>{{ project.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            Agent
+            <select name="agent_name">
+              <option value="">All agents</option>
+              {% for agent in agents %}
+                <option value="{{ agent }}" {% if filters.agent_name == agent %}selected{% endif %}>{{ agent }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            Status
+            <select name="status">
+              <option value="">All statuses</option>
+              <option value="satisfied" {% if filters.status == "satisfied" %}selected{% endif %}>Satisfied</option>
+              <option value="failed" {% if filters.status == "failed" %}selected{% endif %}>Failed</option>
+            </select>
+          </label>
+          <label>
+            Method
+            <select name="method_id">
+              <option value="">All methods</option>
+              {% for method in methods %}
+                <option value="{{ method.id }}" {% if filters.method_id|string == method.id|string %}selected{% endif %}>{{ method.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button class="button" type="submit">Apply</button>
+        </form>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Agent Comparison</h2>
+          </div>
+          <div class="agent-list">
+            {% for stat in agent_stats %}
+              <div class="agent-row">
+                <div>
+                  <strong>{{ stat.agent }}</strong>
+                  <span>{{ stat.passed }} passed / {{ stat.failed }} failed</span>
+                </div>
+                <div class="bar" aria-label="{{ stat.rate }} percent satisfied">
+                  <span style="width: {{ stat.rate }}%"></span>
+                </div>
+                <b>{{ stat.rate }}%</b>
+                <em>{{ stat.avg_confidence }} confidence</em>
+              </div>
+            {% endfor %}
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Issue Frequency</h2>
+          </div>
+          {% if issues %}
+            <ul class="issue-list">
+              {% for issue in issues %}
+                <li><span>{{ issue.category }}</span><strong>{{ issue.count }}</strong></li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p class="empty">No failure categories in the current view.</p>
+          {% endif %}
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>Confidence Trend</h2>
+        </div>
+        <div class="trend">
+          {% for point in confidence_trend %}
+            <div class="trend-point">
+              <span style="height: {{ point.confidence }}%"></span>
+              <small>{{ point.agent }}</small>
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="forms-grid">
+        <article class="panel">
+          <h2>Project</h2>
+          <form action="{{ url_for('save_project') }}" method="post" data-edit-form="project">
+            <input type="hidden" name="id">
+            <label>Name<input name="name" required></label>
+            <label>Description<textarea name="description" rows="3"></textarea></label>
+            <button class="button primary" type="submit">Save project</button>
+          </form>
+        </article>
+
+        <article class="panel">
+          <h2>Task</h2>
+          <form action="{{ url_for('save_task') }}" method="post" data-edit-form="task">
+            <input type="hidden" name="id">
+            <label>Project
+              <select name="project_id" required>
+                {% for project in projects %}
+                  <option value="{{ project.id }}">{{ project.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Title<input name="title" required></label>
+            <label>Original request<textarea name="original_request" rows="3"></textarea></label>
+            <label>Expected outcome<textarea name="expected_outcome" rows="3"></textarea></label>
+            <button class="button primary" type="submit">Save task</button>
+          </form>
+        </article>
+
+        <article class="panel">
+          <h2>Instruction Method</h2>
+          <form action="{{ url_for('save_method') }}" method="post" data-edit-form="method">
+            <input type="hidden" name="id">
+            <label>Name<input name="name" required></label>
+            <label>Steps<textarea name="steps" rows="5"></textarea></label>
+            <button class="button primary" type="submit">Save method</button>
+          </form>
+        </article>
+
+        <article class="panel">
+          <h2>Evaluation</h2>
+          <form action="{{ url_for('save_evaluation') }}" method="post" data-edit-form="evaluation">
+            <input type="hidden" name="id">
+            <label>Task
+              <select name="task_id" required>
+                {% for task in tasks %}
+                  <option value="{{ task.id }}">{{ task.project_name }} / {{ task.title }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Agent
+              <select name="agent_name" required>
+                {% for agent in agents %}
+                  <option value="{{ agent }}">{{ agent }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Instruction method
+              <select name="method_id" required>
+                {% for method in methods %}
+                  <option value="{{ method.id }}">{{ method.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Status
+              <select name="satisfied">
+                <option value="1">Satisfied</option>
+                <option value="0">Failed</option>
+              </select>
+            </label>
+            <label>Confidence<input name="confidence_score" type="number" min="0" max="100" value="80"></label>
+            <label>Issue category<input name="issue_category" placeholder="Verification gap"></label>
+            <label>Repo link<input name="repo_link" type="url" placeholder="https://..."></label>
+            <label>Result link<input name="result_link" type="url" placeholder="https://..."></label>
+            <label>Notes<textarea name="notes" rows="4"></textarea></label>
+            <button class="button primary" type="submit">Save evaluation</button>
+          </form>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>Recent Evaluations</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Project</th>
+                <th>Task</th>
+                <th>Agent</th>
+                <th>Method</th>
+                <th>Status</th>
+                <th>Confidence</th>
+                <th>Issue</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for evaluation in evaluations %}
+                <tr>
+                  <td>{{ evaluation.project_name }}</td>
+                  <td>{{ evaluation.task_title }}</td>
+                  <td>{{ evaluation.agent_name }}</td>
+                  <td>{{ evaluation.method_name }}</td>
+                  <td><span class="status {{ 'pass' if evaluation.satisfied else 'fail' }}">{{ 'Satisfied' if evaluation.satisfied else 'Failed' }}</span></td>
+                  <td>{{ evaluation.confidence_score }}</td>
+                  <td>{{ evaluation.issue_category or '-' }}</td>
+                  <td>
+                    <button
+                      class="link-button"
+                      type="button"
+                      data-edit='{{ dict(evaluation)|tojson }}'
+                      data-target="evaluation">Edit</button>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="management-grid">
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Projects</h2>
+          </div>
+          {% for project in projects %}
+            <div class="compact-row">
+              <span>{{ project.name }}</span>
+              <button class="link-button" type="button" data-target="project" data-edit='{{ dict(project)|tojson }}'>Edit</button>
+            </div>
+          {% endfor %}
+        </article>
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Tasks</h2>
+          </div>
+          {% for task in tasks %}
+            <div class="compact-row">
+              <span>{{ task.title }}</span>
+              <button class="link-button" type="button" data-target="task" data-edit='{{ dict(task)|tojson }}'>Edit</button>
+            </div>
+          {% endfor %}
+        </article>
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Methods</h2>
+          </div>
+          {% for method in methods %}
+            <div class="compact-row">
+              <span>{{ method.name }}</span>
+              <button class="link-button" type="button" data-target="method" data-edit='{{ dict(method)|tojson }}'>Edit</button>
+            </div>
+          {% endfor %}
+        </article>
+        <article class="panel">
+          <div class="panel-heading">
+            <h2>Import JSON</h2>
+          </div>
+          <form action="{{ url_for('import_json') }}" method="post" enctype="multipart/form-data">
+            <label>Backup file<input name="json_file" type="file" accept="application/json" required></label>
+            <button class="button" type="submit">Import</button>
+          </form>
+        </article>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>
