@@ -17,13 +17,13 @@ The app creates `data/evaluations.db` automatically and seeds example records fo
 
 ## One-Line Agent Update Command
 
-Give this to a coding agent after it completes a task:
+Give this to a coding agent before it starts work so it knows how to record the result after it finishes. If the instruction method was not already specified, the agent should ask the user what instruction method to record before running the command. After the task is complete, the agent should replace the placeholders, set `satisfied` based on the user's final judgment, run the command, and briefly confirm whether the tracker update succeeded.
 
 ```bash
-curl -s -X POST http://127.0.0.1:5055/api/tasks -H 'content-type: application/json' -d '{"task_name":"REPLACE_WITH_TASK_NAME","agent_name":"Codex","github_repo_link":"https://github.com/OWNER/REPO","satisfied":true,"instruction_method":"Plan mode first -> complete the task"}'
+curl -s -X POST http://127.0.0.1:5055/api/tasks -H 'content-type: application/json' -d '{"task_name":"REPLACE_WITH_TASK_NAME","agent_name":"REPLACE_WITH_AGENT_NAME","github_repo_link":"https://github.com/OWNER/REPO","satisfied":true,"instruction_method":"ASK_USER_FOR_INSTRUCTION_METHOD"}'
 ```
 
-Change `agent_name`, `github_repo_link`, and `satisfied` as needed. Leave `github_repo_link` as an empty string when there is no repo link.
+Leave `github_repo_link` as an empty string when there is no repo link.
 
 ## Agent API
 
